@@ -9,6 +9,12 @@ lerna-debug.log*
 
 node_modules
 dist
+
+# Java / Maven
+backend/target/
+backend/src/main/resources/hibernate.properties
+.env
+.env.local
 dist-ssr
 *.local
 

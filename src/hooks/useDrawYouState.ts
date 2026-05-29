@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   addEdge,
   applyEdgeChanges,
@@ -9,9 +9,9 @@ import {
   type EdgeChange,
   type NodeChange,
 } from '@xyflow/react'
-import { initialEdges, initialNodes } from '../data/seed'
+import { defaultEdges } from '../data/defaultEdges'
+import { noFluxogramaApi } from '../services/noFluxogramaApi'
 import type {
-  DrawYouNodeKind,
   DrawYouEdge,
   DrawYouEdgeType,
   DrawYouNode,
@@ -21,23 +21,33 @@ import type {
   IUpdateNodeDataPayload,
   NodeStatus,
 } from '../types/drawYou'
-import { useState } from 'react'
+import type { IDashboardApi } from '../types/noFluxograma'
+import {
+  mergeNodeDataPayload,
+  parseNodeId,
+  toApiPayloadFromCreate,
+  toApiPayloadFromNode,
+  toDrawYouNode,
+} from '../utils/flowMappers'
 
 interface IUseDrawYouStateReturn {
   nodes: DrawYouNode[]
   edges: DrawYouEdge[]
   dashboard: IDashboardDrawYou
+  isLoading: boolean
+  apiError: string | null
+  recarregar: () => Promise<void>
   onNodesChange: (changes: NodeChange<DrawYouNode>[]) => void
   onEdgesChange: (changes: EdgeChange<DrawYouEdge>[]) => void
   onConnect: (connection: Connection) => void
   onReconnect: (oldEdge: Edge, newConnection: Connection) => void
   updateEdgeStyle: (edgeId: string, payload: IUpdateEdgeStylePayload) => void
   removeEdge: (edgeId: string) => void
-  addNode: (payload: ICreateNodePayload) => void
-  duplicateNode: (nodeId: string) => void
-  removeNode: (nodeId: string) => void
-  updateNodeStatus: (nodeId: string, status: NodeStatus) => void
-  updateNodeData: (nodeId: string, payload: IUpdateNodeDataPayload) => void
+  addNode: (payload: ICreateNodePayload) => Promise<void>
+  duplicateNode: (nodeId: string) => Promise<void>
+  removeNode: (nodeId: string) => Promise<void>
+  updateNodeStatus: (nodeId: string, status: NodeStatus) => Promise<void>
+  updateNodeData: (nodeId: string, payload: IUpdateNodeDataPayload) => Promise<void>
 }
 
 interface IEdgeStylePreset {
@@ -55,13 +65,13 @@ interface INodeStylePreset {
 }
 
 interface IPersistedBoardState {
-  nodes: DrawYouNode[]
   edges: DrawYouEdge[]
   edgePreset: IEdgeStylePreset
   nodeStylePreset: INodeStylePreset
 }
 
-const BOARD_STORAGE_KEY = 'draw-you-board-v1'
+const BOARD_STORAGE_KEY = 'draw-you-board-v2'
+const POSITION_SYNC_DELAY_MS = 400
 
 const DEFAULT_EDGE_PRESET: IEdgeStylePreset = {
   type: 'smoothstep',
@@ -73,54 +83,6 @@ const DEFAULT_EDGE_PRESET: IEdgeStylePreset = {
 const DEFAULT_NODE_STYLE_PRESET: INodeStylePreset = {}
 
 const getMarkerSize = (strokeWidth: number) => Math.max(10, Math.min(18, 9 + strokeWidth * 1.1))
-
-const getInitialEdges = () =>
-  initialEdges.map((edge) => ({
-    ...edgeVisualDefaults,
-    ...edge,
-    type: (edge.type as DrawYouEdgeType | undefined) ?? 'smoothstep',
-  }))
-
-const readPersistedBoardState = (): IPersistedBoardState | null => {
-  if (typeof window === 'undefined') {
-    return null
-  }
-
-  try {
-    const rawValue = window.localStorage.getItem(BOARD_STORAGE_KEY)
-    if (!rawValue) {
-      return null
-    }
-
-    const parsedValue = JSON.parse(rawValue) as Partial<IPersistedBoardState>
-    if (!Array.isArray(parsedValue.nodes) || !Array.isArray(parsedValue.edges)) {
-      return null
-    }
-
-    const parsedPreset = parsedValue.edgePreset ?? DEFAULT_EDGE_PRESET
-    const parsedNodeStylePreset = parsedValue.nodeStylePreset ?? DEFAULT_NODE_STYLE_PRESET
-
-    return {
-      nodes: parsedValue.nodes as DrawYouNode[],
-      edges: parsedValue.edges as DrawYouEdge[],
-      edgePreset: {
-        type: parsedPreset.type ?? DEFAULT_EDGE_PRESET.type,
-        strokeWidth: parsedPreset.strokeWidth ?? DEFAULT_EDGE_PRESET.strokeWidth,
-        dashed: parsedPreset.dashed ?? DEFAULT_EDGE_PRESET.dashed,
-        color: parsedPreset.color ?? DEFAULT_EDGE_PRESET.color,
-      },
-      nodeStylePreset: {
-        nodeBgColor: parsedNodeStylePreset.nodeBgColor,
-        nodeBorderColor: parsedNodeStylePreset.nodeBorderColor,
-        nodeTextColor: parsedNodeStylePreset.nodeTextColor,
-        nodeBorderWidth: parsedNodeStylePreset.nodeBorderWidth,
-      },
-    }
-  } catch (error) {
-    console.error('Falha ao ler estado salvo do board:', error)
-    return null
-  }
-}
 
 const edgeVisualDefaults: Partial<DrawYouEdge> = {
   type: DEFAULT_EDGE_PRESET.type,
@@ -148,25 +110,131 @@ const edgeVisualDefaults: Partial<DrawYouEdge> = {
   labelBgPadding: [8, 4],
 }
 
-const getNodeId = () => {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return `node-${crypto.randomUUID()}`
+const withEdgeDefaults = (edges: DrawYouEdge[]): DrawYouEdge[] =>
+  edges.map((edge) => ({
+    ...edgeVisualDefaults,
+    ...edge,
+    type: (edge.type as DrawYouEdgeType | undefined) ?? 'smoothstep',
+  }))
+
+const readPersistedBoardState = (): IPersistedBoardState | null => {
+  if (typeof window === 'undefined') {
+    return null
   }
 
-  return `node-${Date.now()}`
+  try {
+    const rawValue = window.localStorage.getItem(BOARD_STORAGE_KEY)
+    if (!rawValue) {
+      return null
+    }
+
+    const parsedValue = JSON.parse(rawValue) as Partial<IPersistedBoardState>
+    if (!Array.isArray(parsedValue.edges)) {
+      return null
+    }
+
+    const parsedPreset = parsedValue.edgePreset ?? DEFAULT_EDGE_PRESET
+    const parsedNodeStylePreset = parsedValue.nodeStylePreset ?? DEFAULT_NODE_STYLE_PRESET
+
+    return {
+      edges: parsedValue.edges as DrawYouEdge[],
+      edgePreset: {
+        type: parsedPreset.type ?? DEFAULT_EDGE_PRESET.type,
+        strokeWidth: parsedPreset.strokeWidth ?? DEFAULT_EDGE_PRESET.strokeWidth,
+        dashed: parsedPreset.dashed ?? DEFAULT_EDGE_PRESET.dashed,
+        color: parsedPreset.color ?? DEFAULT_EDGE_PRESET.color,
+      },
+      nodeStylePreset: {
+        nodeBgColor: parsedNodeStylePreset.nodeBgColor,
+        nodeBorderColor: parsedNodeStylePreset.nodeBorderColor,
+        nodeTextColor: parsedNodeStylePreset.nodeTextColor,
+        nodeBorderWidth: parsedNodeStylePreset.nodeBorderWidth,
+      },
+    }
+  } catch (error) {
+    console.error('Falha ao ler estado salvo do board:', error)
+    return null
+  }
 }
+
+const filtrarEdgesValidas = (edges: DrawYouEdge[], nodeIds: Set<string>) =>
+  edges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target))
+
+const combinarDashboard = (apiDashboard: IDashboardApi, totalConexoes: number): IDashboardDrawYou => ({
+  totalNos: apiDashboard.totalNos,
+  totalConexoes,
+  totalPendentes: apiDashboard.totalPendentes,
+  totalAtivos: apiDashboard.totalAtivos,
+  totalConcluidos: apiDashboard.totalConcluidos,
+  totalErros: apiDashboard.totalErros,
+})
+
+const temCamposDeNegocio = (payload: IUpdateNodeDataPayload) =>
+  payload.titulo !== undefined ||
+  payload.descricao !== undefined ||
+  payload.tipo !== undefined ||
+  payload.status !== undefined
 
 export const useDrawYouState = (): IUseDrawYouStateReturn => {
   const persistedState = useMemo(() => readPersistedBoardState(), [])
+  const positionSyncTimers = useRef<Record<string, number>>({})
 
-  const [nodes, setNodes] = useState<DrawYouNode[]>(persistedState?.nodes ?? initialNodes)
+  const [nodes, setNodes] = useState<DrawYouNode[]>([])
+  const [edges, setEdges] = useState<DrawYouEdge[]>(
+    withEdgeDefaults(persistedState?.edges ?? defaultEdges),
+  )
   const [edgePreset, setEdgePreset] = useState<IEdgeStylePreset>(
     persistedState?.edgePreset ?? DEFAULT_EDGE_PRESET,
   )
   const [nodeStylePreset, setNodeStylePreset] = useState<INodeStylePreset>(
     persistedState?.nodeStylePreset ?? DEFAULT_NODE_STYLE_PRESET,
   )
-  const [edges, setEdges] = useState<DrawYouEdge[]>(persistedState?.edges ?? getInitialEdges())
+  const [dashboardApi, setDashboardApi] = useState<IDashboardApi>({
+    totalNos: 0,
+    totalPendentes: 0,
+    totalAtivos: 0,
+    totalConcluidos: 0,
+    totalErros: 0,
+  })
+  const [isLoading, setIsLoading] = useState(true)
+  const [apiError, setApiError] = useState<string | null>(null)
+
+  const aplicarNosDaApi = useCallback(
+    (apiNodes: Awaited<ReturnType<typeof noFluxogramaApi.listar>>) => {
+      const flowNodes = apiNodes.map((no) => toDrawYouNode(no, nodeStylePreset))
+      const nodeIds = new Set(flowNodes.map((node) => node.id))
+      setNodes(flowNodes)
+      setEdges((currentEdges) =>
+        withEdgeDefaults(
+          filtrarEdgesValidas(currentEdges.length > 0 ? currentEdges : defaultEdges, nodeIds),
+        ),
+      )
+    },
+    [nodeStylePreset],
+  )
+
+  const recarregar = useCallback(async () => {
+    setIsLoading(true)
+    setApiError(null)
+
+    try {
+      const [apiNodes, apiDashboard] = await Promise.all([
+        noFluxogramaApi.listar(),
+        noFluxogramaApi.dashboard(),
+      ])
+      aplicarNosDaApi(apiNodes)
+      setDashboardApi(apiDashboard)
+    } catch (error) {
+      const mensagem = error instanceof Error ? error.message : 'Falha ao carregar dados da API.'
+      setApiError(mensagem)
+    } finally {
+      setIsLoading(false)
+    }
+  }, [aplicarNosDaApi])
+
+  useEffect(() => {
+    void recarregar()
+  }, [recarregar])
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -174,18 +242,54 @@ export const useDrawYouState = (): IUseDrawYouStateReturn => {
     }
 
     const payload: IPersistedBoardState = {
-      nodes,
       edges,
       edgePreset,
       nodeStylePreset,
     }
 
     window.localStorage.setItem(BOARD_STORAGE_KEY, JSON.stringify(payload))
-  }, [edgePreset, edges, nodeStylePreset, nodes])
+  }, [edgePreset, edges, nodeStylePreset])
 
-  const onNodesChange = useCallback((changes: NodeChange<DrawYouNode>[]) => {
-    setNodes((currentNodes) => applyNodeChanges(changes, currentNodes))
+  const sincronizarPosicao = useCallback((node: DrawYouNode) => {
+    const apiId = parseNodeId(node.id)
+    if (apiId === null) {
+      return
+    }
+
+    if (positionSyncTimers.current[node.id]) {
+      window.clearTimeout(positionSyncTimers.current[node.id])
+    }
+
+    positionSyncTimers.current[node.id] = window.setTimeout(() => {
+      void (async () => {
+        try {
+          await noFluxogramaApi.atualizar(apiId, toApiPayloadFromNode(node))
+        } catch (error) {
+          console.error('Falha ao sincronizar posicao do no:', error)
+        }
+      })()
+    }, POSITION_SYNC_DELAY_MS)
   }, [])
+
+  const onNodesChange = useCallback(
+    (changes: NodeChange<DrawYouNode>[]) => {
+      setNodes((currentNodes) => {
+        const nextNodes = applyNodeChanges(changes, currentNodes)
+
+        for (const change of changes) {
+          if (change.type === 'position' && change.dragging === false) {
+            const nodeAtualizado = nextNodes.find((node) => node.id === change.id)
+            if (nodeAtualizado) {
+              sincronizarPosicao(nodeAtualizado)
+            }
+          }
+        }
+
+        return nextNodes
+      })
+    },
+    [sincronizarPosicao],
+  )
 
   const onEdgesChange = useCallback((changes: EdgeChange<DrawYouEdge>[]) => {
     setEdges((currentEdges) => applyEdgeChanges(changes, currentEdges))
@@ -293,145 +397,201 @@ export const useDrawYouState = (): IUseDrawYouStateReturn => {
     setEdges((currentEdges) => currentEdges.filter((edge) => edge.id !== edgeId))
   }, [])
 
-  const addNode = useCallback((payload: ICreateNodePayload) => {
-    setNodes((currentNodes) => {
-      const nextIndex = currentNodes.length
-      const nextNode: DrawYouNode = {
-        id: getNodeId(),
-        type: 'drawYouNode',
-        position: {
-          x: 80 + (nextIndex % 3) * 280,
-          y: 280 + Math.floor(nextIndex / 3) * 150,
-        },
-        data: {
-          titulo: payload.titulo,
-          descricao: '',
-          tipo: payload.tipo,
-          status: payload.status,
-          ...nodeStylePreset,
-        },
+  const addNode = useCallback(
+    async (payload: ICreateNodePayload) => {
+      setApiError(null)
+      const posicao = {
+        x: 80 + (nodes.length % 3) * 280,
+        y: 280 + Math.floor(nodes.length / 3) * 150,
       }
 
-      return [...currentNodes, nextNode]
-    })
-  }, [nodeStylePreset])
+      try {
+        const criado = await noFluxogramaApi.cadastrar(
+          toApiPayloadFromCreate(payload, posicao),
+        )
+        setNodes((current) => [...current, toDrawYouNode(criado, nodeStylePreset)])
+        const apiDashboard = await noFluxogramaApi.dashboard()
+        setDashboardApi(apiDashboard)
+      } catch (error) {
+        const mensagem = error instanceof Error ? error.message : 'Falha ao cadastrar no.'
+        setApiError(mensagem)
+        throw error
+      }
+    },
+    [nodeStylePreset, nodes.length],
+  )
 
-  const duplicateNode = useCallback((nodeId: string) => {
-    setNodes((currentNodes) => {
-      const sourceNode = currentNodes.find((node) => node.id === nodeId)
+  const duplicateNode = useCallback(
+    async (nodeId: string) => {
+      const sourceNode = nodes.find((node) => node.id === nodeId)
       if (!sourceNode) {
-        return currentNodes
+        return
       }
 
-      const duplicatedNode: DrawYouNode = {
-        ...sourceNode,
-        id: getNodeId(),
-        position: {
-          x: sourceNode.position.x + 60,
-          y: sourceNode.position.y + 60,
-        },
-        data: {
-          ...sourceNode.data,
+      setApiError(null)
+
+      try {
+        const criado = await noFluxogramaApi.cadastrar({
           titulo: `${sourceNode.data.titulo} copia`,
-        },
+          descricao: sourceNode.data.descricao ?? '',
+          tipo: sourceNode.data.tipo,
+          status: sourceNode.data.status,
+          posicaoX: sourceNode.position.x + 60,
+          posicaoY: sourceNode.position.y + 60,
+        })
+        setNodes((current) => [...current, toDrawYouNode(criado, nodeStylePreset)])
+        const apiDashboard = await noFluxogramaApi.dashboard()
+        setDashboardApi(apiDashboard)
+      } catch (error) {
+        const mensagem = error instanceof Error ? error.message : 'Falha ao duplicar no.'
+        setApiError(mensagem)
+      }
+    },
+    [nodeStylePreset, nodes],
+  )
+
+  const persistirNoNaApi = useCallback(
+    async (nodeId: string, payload: IUpdateNodeDataPayload) => {
+      const apiId = parseNodeId(nodeId)
+      const nodeAtual = nodes.find((node) => node.id === nodeId)
+
+      if (apiId === null || !nodeAtual) {
+        return
       }
 
-      return [...currentNodes, duplicatedNode]
-    })
-  }, [])
+      const atualizado = await noFluxogramaApi.atualizar(
+        apiId,
+        mergeNodeDataPayload(nodeAtual, payload),
+      )
 
-  const removeNode = useCallback((nodeId: string) => {
-    setNodes((currentNodes) => currentNodes.filter((node) => node.id !== nodeId))
-    setEdges((currentEdges) =>
-      currentEdges.filter((edge) => edge.source !== nodeId && edge.target !== nodeId),
-    )
-  }, [])
+      setNodes((current) =>
+        current.map((node) =>
+          node.id === nodeId ? toDrawYouNode(atualizado, nodeStylePreset) : node,
+        ),
+      )
+      const apiDashboard = await noFluxogramaApi.dashboard()
+      setDashboardApi(apiDashboard)
+    },
+    [nodeStylePreset, nodes],
+  )
 
-  const updateNodeStatus = useCallback((nodeId: string, status: NodeStatus) => {
-    setNodes((currentNodes) =>
-      currentNodes.map((node) =>
-        node.id === nodeId ? { ...node, data: { ...node.data, status } } : node,
-      ),
-    )
-  }, [])
+  const removeNode = useCallback(
+    async (nodeId: string) => {
+      const apiId = parseNodeId(nodeId)
+      if (apiId === null) {
+        return
+      }
 
-  const updateNodeData = useCallback((nodeId: string, payload: IUpdateNodeDataPayload) => {
-    const hasStylePayload =
-      payload.nodeBgColor !== undefined ||
-      payload.nodeBorderColor !== undefined ||
-      payload.nodeTextColor !== undefined ||
-      payload.nodeBorderWidth !== undefined
+      setApiError(null)
 
-    if (hasStylePayload) {
-      setNodeStylePreset((currentPreset) => ({
-        ...currentPreset,
-        ...(payload.nodeBgColor !== undefined ? { nodeBgColor: payload.nodeBgColor } : {}),
-        ...(payload.nodeBorderColor !== undefined
-          ? { nodeBorderColor: payload.nodeBorderColor }
-          : {}),
-        ...(payload.nodeTextColor !== undefined ? { nodeTextColor: payload.nodeTextColor } : {}),
-        ...(payload.nodeBorderWidth !== undefined
-          ? { nodeBorderWidth: payload.nodeBorderWidth }
-          : {}),
-      }))
-    }
+      try {
+        await noFluxogramaApi.excluir(apiId)
+        setNodes((current) => current.filter((node) => node.id !== nodeId))
+        setEdges((current) =>
+          current.filter((edge) => edge.source !== nodeId && edge.target !== nodeId),
+        )
+        const apiDashboard = await noFluxogramaApi.dashboard()
+        setDashboardApi(apiDashboard)
+      } catch (error) {
+        const mensagem = error instanceof Error ? error.message : 'Falha ao excluir no.'
+        setApiError(mensagem)
+      }
+    },
+    [],
+  )
 
-    setNodes((currentNodes) =>
-      currentNodes.map((node) =>
-        node.id === nodeId
-          ? {
-              ...node,
-              data: {
-                ...node.data,
-                ...(payload.titulo !== undefined ? { titulo: payload.titulo } : {}),
-                ...(payload.descricao !== undefined ? { descricao: payload.descricao } : {}),
-                ...(payload.tipo !== undefined
-                  ? { tipo: payload.tipo as DrawYouNodeKind }
-                  : {}),
-                ...(payload.status !== undefined
-                  ? { status: payload.status as NodeStatus }
-                  : {}),
-                ...(payload.nodeBgColor !== undefined
-                  ? { nodeBgColor: payload.nodeBgColor }
-                  : {}),
-                ...(payload.nodeBorderColor !== undefined
-                  ? { nodeBorderColor: payload.nodeBorderColor }
-                  : {}),
-                ...(payload.nodeTextColor !== undefined
-                  ? { nodeTextColor: payload.nodeTextColor }
-                  : {}),
-                ...(payload.nodeBorderWidth !== undefined
-                  ? { nodeBorderWidth: payload.nodeBorderWidth }
-                  : {}),
-              },
-            }
-          : node,
-      ),
-    )
-  }, [])
+  const updateNodeStatus = useCallback(
+    async (nodeId: string, status: NodeStatus) => {
+      setApiError(null)
+      try {
+        await persistirNoNaApi(nodeId, { status })
+      } catch (error) {
+        const mensagem = error instanceof Error ? error.message : 'Falha ao atualizar status.'
+        setApiError(mensagem)
+      }
+    },
+    [persistirNoNaApi],
+  )
 
-  const dashboard = useMemo<IDashboardDrawYou>(() => {
-    const totalNos = nodes.length
-    const totalConexoes = edges.length
-    const totalPendentes = nodes.filter((node) => node.data.status === 'pendente').length
-    const totalAtivos = nodes.filter((node) => node.data.status === 'ativo').length
-    const totalConcluidos = nodes.filter((node) => node.data.status === 'concluido').length
-    const totalErros = nodes.filter((node) => node.data.status === 'erro').length
+  const updateNodeData = useCallback(
+    async (nodeId: string, payload: IUpdateNodeDataPayload) => {
+      const hasStylePayload =
+        payload.nodeBgColor !== undefined ||
+        payload.nodeBorderColor !== undefined ||
+        payload.nodeTextColor !== undefined ||
+        payload.nodeBorderWidth !== undefined
 
-    return {
-      totalNos,
-      totalConexoes,
-      totalPendentes,
-      totalAtivos,
-      totalConcluidos,
-      totalErros,
-    }
-  }, [edges.length, nodes])
+      if (hasStylePayload) {
+        setNodeStylePreset((currentPreset) => ({
+          ...currentPreset,
+          ...(payload.nodeBgColor !== undefined ? { nodeBgColor: payload.nodeBgColor } : {}),
+          ...(payload.nodeBorderColor !== undefined
+            ? { nodeBorderColor: payload.nodeBorderColor }
+            : {}),
+          ...(payload.nodeTextColor !== undefined ? { nodeTextColor: payload.nodeTextColor } : {}),
+          ...(payload.nodeBorderWidth !== undefined
+            ? { nodeBorderWidth: payload.nodeBorderWidth }
+            : {}),
+        }))
+      }
+
+      setNodes((currentNodes) =>
+        currentNodes.map((node) =>
+          node.id === nodeId
+            ? {
+                ...node,
+                data: {
+                  ...node.data,
+                  ...(payload.titulo !== undefined ? { titulo: payload.titulo } : {}),
+                  ...(payload.descricao !== undefined ? { descricao: payload.descricao } : {}),
+                  ...(payload.tipo !== undefined ? { tipo: payload.tipo } : {}),
+                  ...(payload.status !== undefined ? { status: payload.status } : {}),
+                  ...(payload.nodeBgColor !== undefined
+                    ? { nodeBgColor: payload.nodeBgColor }
+                    : {}),
+                  ...(payload.nodeBorderColor !== undefined
+                    ? { nodeBorderColor: payload.nodeBorderColor }
+                    : {}),
+                  ...(payload.nodeTextColor !== undefined
+                    ? { nodeTextColor: payload.nodeTextColor }
+                    : {}),
+                  ...(payload.nodeBorderWidth !== undefined
+                    ? { nodeBorderWidth: payload.nodeBorderWidth }
+                    : {}),
+                },
+              }
+            : node,
+        ),
+      )
+
+      if (!temCamposDeNegocio(payload)) {
+        return
+      }
+
+      setApiError(null)
+      try {
+        await persistirNoNaApi(nodeId, payload)
+      } catch (error) {
+        const mensagem = error instanceof Error ? error.message : 'Falha ao atualizar no.'
+        setApiError(mensagem)
+        void recarregar()
+      }
+    },
+    [persistirNoNaApi, recarregar],
+  )
+
+  const dashboard = useMemo<IDashboardDrawYou>(
+    () => combinarDashboard(dashboardApi, edges.length),
+    [dashboardApi, edges.length],
+  )
 
   return {
     nodes,
     edges,
     dashboard,
+    isLoading,
+    apiError,
+    recarregar,
     onNodesChange,
     onEdgesChange,
     onConnect,

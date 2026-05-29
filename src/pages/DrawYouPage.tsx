@@ -15,6 +15,9 @@ export const DrawYouPage = () => {
     nodes,
     edges,
     dashboard,
+    isLoading,
+    apiError,
+    recarregar,
     onNodesChange,
     onEdgesChange,
     onConnect,
@@ -29,8 +32,9 @@ export const DrawYouPage = () => {
   } = useDrawYouState()
 
   const currentDate = new Date().toLocaleDateString('pt-BR')
+
   const handleCreateQuickNode = () => {
-    addNode({
+    void addNode({
       titulo: `Novo no ${nodes.length + 1}`,
       tipo: 'processo',
       status: 'pendente',
@@ -40,6 +44,24 @@ export const DrawYouPage = () => {
   return (
     <div className="app-shell">
       <DrawYouHeader onToggleSidebar={() => setIsSidebarOpen(true)} />
+
+      {apiError ? (
+        <div className="container-fluid px-3 pt-2">
+          <div className="alert alert-danger d-flex justify-content-between align-items-center mb-0">
+            <span>{apiError}</span>
+            <button type="button" className="btn btn-sm btn-outline-danger" onClick={() => void recarregar()}>
+              Tentar novamente
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {isLoading ? (
+        <div className="container-fluid px-3 pt-2">
+          <p className="text-secondary mb-0">Carregando nos do servidor...</p>
+        </div>
+      ) : null}
+
       <DrawYouMain
         canvas={
           <DrawYouCanvas
@@ -65,6 +87,7 @@ export const DrawYouPage = () => {
         nodes={nodes}
         dashboard={dashboard}
         onAddNode={addNode}
+        onUpdateNode={updateNodeData}
         onUpdateNodeStatus={updateNodeStatus}
         onRemoveNode={removeNode}
       />

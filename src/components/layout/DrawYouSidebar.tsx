@@ -1,9 +1,10 @@
-import { type FormEvent, useMemo, useState } from 'react'
+import { type FormEvent, useEffect, useMemo, useState } from 'react'
 import { DashboardCards } from '../dashboard/DashboardCards'
 import type {
   DrawYouNode,
   DrawYouNodeKind,
   IDashboardDrawYou,
+  IUpdateNodeDataPayload,
   NodeStatus,
 } from '../../types/drawYou'
 
@@ -12,9 +13,10 @@ interface DrawYouSidebarProps {
   onClose: () => void
   nodes: DrawYouNode[]
   dashboard: IDashboardDrawYou
-  onAddNode: (payload: { titulo: string; tipo: DrawYouNodeKind; status: NodeStatus }) => void
-  onUpdateNodeStatus: (nodeId: string, status: NodeStatus) => void
-  onRemoveNode: (nodeId: string) => void
+  onAddNode: (payload: { titulo: string; tipo: DrawYouNodeKind; status: NodeStatus }) => Promise<void>
+  onUpdateNode: (nodeId: string, payload: IUpdateNodeDataPayload) => Promise<void>
+  onUpdateNodeStatus: (nodeId: string, status: NodeStatus) => Promise<void>
+  onRemoveNode: (nodeId: string) => Promise<void>
 }
 
 const defaultNodeKinds: DrawYouNodeKind[] = ['inicio', 'processo', 'decisao', 'fim']
@@ -26,6 +28,7 @@ export const DrawYouSidebar = ({
   nodes,
   dashboard,
   onAddNode,
+  onUpdateNode,
   onUpdateNodeStatus,
   onRemoveNode,
 }: DrawYouSidebarProps) => {
@@ -34,6 +37,12 @@ export const DrawYouSidebar = ({
   const [status, setStatus] = useState<NodeStatus>('pendente')
   const [newStatusOption, setNewStatusOption] = useState('')
   const [newTypeOption, setNewTypeOption] = useState('')
+  const [editingNodeId, setEditingNodeId] = useState<string | null>(null)
+  const [editTitulo, setEditTitulo] = useState('')
+  const [editDescricao, setEditDescricao] = useState('')
+  const [editTipo, setEditTipo] = useState<DrawYouNodeKind>('processo')
+  const [editStatus, setEditStatus] = useState<NodeStatus>('pendente')
+
   const nodeKinds = useMemo(
     () => Array.from(new Set([...defaultNodeKinds, ...nodes.map((node) => node.data.tipo)])),
     [nodes],
@@ -44,6 +53,19 @@ export const DrawYouSidebar = ({
   )
   const [activeTab, setActiveTab] = useState<'acoes' | 'itens' | 'dashboard'>('acoes')
 
+  const editingNode = nodes.find((node) => node.id === editingNodeId) ?? null
+
+  useEffect(() => {
+    if (!editingNode) {
+      return
+    }
+
+    setEditTitulo(editingNode.data.titulo)
+    setEditDescricao(editingNode.data.descricao ?? '')
+    setEditTipo(editingNode.data.tipo)
+    setEditStatus(editingNode.data.status)
+  }, [editingNode])
+
   const handleAddNode = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const cleanTitle = titulo.trim()
@@ -52,15 +74,36 @@ export const DrawYouSidebar = ({
       return
     }
 
-    onAddNode({
+    void onAddNode({
       titulo: cleanTitle,
       tipo,
       status,
+    }).then(() => {
+      setTitulo('')
+      setTipo('processo')
+      setStatus('pendente')
     })
+  }
 
-    setTitulo('')
-    setTipo('processo')
-    setStatus('pendente')
+  const handleEditNode = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!editingNodeId) {
+      return
+    }
+
+    const cleanTitle = editTitulo.trim()
+    if (!cleanTitle) {
+      return
+    }
+
+    void onUpdateNode(editingNodeId, {
+      titulo: cleanTitle,
+      descricao: editDescricao,
+      tipo: editTipo,
+      status: editStatus,
+    }).then(() => {
+      setEditingNodeId(null)
+    })
   }
 
   return (
@@ -131,6 +174,21 @@ export const DrawYouSidebar = ({
                   </option>
                 ))}
               </select>
+              <label className="form-label mb-0" htmlFor="node-status">
+                Status
+              </label>
+              <select
+                id="node-status"
+                className="form-select"
+                value={status}
+                onChange={(event) => setStatus(event.target.value as NodeStatus)}
+              >
+                {statusList.map((statusOption) => (
+                  <option key={statusOption} value={statusOption}>
+                    {statusOption}
+                  </option>
+                ))}
+              </select>
               <div className="d-flex gap-2">
                 <input
                   className="form-control form-control-sm"
@@ -161,21 +219,6 @@ export const DrawYouSidebar = ({
                   +
                 </button>
               </div>
-              <label className="form-label mb-0" htmlFor="node-status">
-                Status
-              </label>
-              <select
-                id="node-status"
-                className="form-select"
-                value={status}
-                onChange={(event) => setStatus(event.target.value as NodeStatus)}
-              >
-                {statusList.map((statusOption) => (
-                  <option key={statusOption} value={statusOption}>
-                    {statusOption}
-                  </option>
-                ))}
-              </select>
               <div className="d-flex gap-2">
                 <input
                   className="form-control form-control-sm"
@@ -216,6 +259,74 @@ export const DrawYouSidebar = ({
         {activeTab === 'itens' ? (
           <section aria-label="Lista de nos">
             <h3 className="h6 mb-3">Itens do fluxo</h3>
+
+            {editingNode ? (
+              <form className="vstack gap-2 mb-3 p-2 border rounded" onSubmit={handleEditNode}>
+                <h4 className="h6 mb-0">Editar no #{editingNode.id}</h4>
+                <label className="form-label mb-0" htmlFor="edit-title">
+                  Titulo
+                </label>
+                <input
+                  id="edit-title"
+                  className="form-control"
+                  value={editTitulo}
+                  onChange={(event) => setEditTitulo(event.target.value)}
+                />
+                <label className="form-label mb-0" htmlFor="edit-desc">
+                  Descricao
+                </label>
+                <textarea
+                  id="edit-desc"
+                  className="form-control"
+                  rows={2}
+                  value={editDescricao}
+                  onChange={(event) => setEditDescricao(event.target.value)}
+                />
+                <label className="form-label mb-0" htmlFor="edit-type">
+                  Tipo
+                </label>
+                <select
+                  id="edit-type"
+                  className="form-select"
+                  value={editTipo}
+                  onChange={(event) => setEditTipo(event.target.value as DrawYouNodeKind)}
+                >
+                  {nodeKinds.map((nodeKind) => (
+                    <option key={nodeKind} value={nodeKind}>
+                      {nodeKind}
+                    </option>
+                  ))}
+                </select>
+                <label className="form-label mb-0" htmlFor="edit-status">
+                  Status
+                </label>
+                <select
+                  id="edit-status"
+                  className="form-select"
+                  value={editStatus}
+                  onChange={(event) => setEditStatus(event.target.value as NodeStatus)}
+                >
+                  {statusList.map((statusOption) => (
+                    <option key={statusOption} value={statusOption}>
+                      {statusOption}
+                    </option>
+                  ))}
+                </select>
+                <div className="d-flex gap-2">
+                  <button type="submit" className="btn btn-sm btn-primary">
+                    Salvar
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline-secondary"
+                    onClick={() => setEditingNodeId(null)}
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              </form>
+            ) : null}
+
             <div className="vstack gap-2">
               {nodes.map((node) => (
                 <article key={node.id} className="node-item-list card border-0 shadow-sm">
@@ -227,27 +338,38 @@ export const DrawYouSidebar = ({
                           {node.data.tipo} | status: {node.data.status}
                         </small>
                       </div>
-                      <button
-                        type="button"
-                        className="btn btn-sm btn-outline-danger remove-icon-btn ms-auto"
-                        onClick={() => onRemoveNode(node.id)}
-                        aria-label="Remover no"
-                        title="Remover no"
-                      >
-                        🗑
-                      </button>
+                      <div className="d-flex gap-1 ms-auto">
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-outline-primary"
+                          onClick={() => setEditingNodeId(node.id)}
+                        >
+                          Editar
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-outline-danger remove-icon-btn"
+                          onClick={() => void onRemoveNode(node.id)}
+                          aria-label="Remover no"
+                          title="Remover no"
+                        >
+                          🗑
+                        </button>
+                      </div>
                     </div>
                     <div className="d-flex gap-1 flex-wrap mt-2">
-                      {statusList.map((status) => (
+                      {statusList.map((statusOption) => (
                         <button
-                          key={status}
+                          key={statusOption}
                           type="button"
                           className={`btn btn-sm ${
-                            node.data.status === status ? 'btn-primary' : 'btn-outline-primary'
+                            node.data.status === statusOption
+                              ? 'btn-primary'
+                              : 'btn-outline-primary'
                           }`}
-                          onClick={() => onUpdateNodeStatus(node.id, status)}
+                          onClick={() => void onUpdateNodeStatus(node.id, statusOption)}
                         >
-                          {status}
+                          {statusOption}
                         </button>
                       ))}
                     </div>
