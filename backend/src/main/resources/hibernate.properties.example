@@ -1,0 +1,6 @@
+# Copie este arquivo para hibernate.properties (na mesma pasta) e ajuste os valores.
+# O arquivo hibernate.properties NAO deve ir para o Git (contem senha).
+
+hibernate.connection.url=jdbc:postgresql://localhost:5432/draw_you
+hibernate.connection.username=postgres
+hibernate.connection.password=SUA_SENHA_AQUI
